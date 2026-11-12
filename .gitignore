@@ -1,0 +1,31 @@
+# Local SDK & environment-specific config
+local.properties
+*.log
+gradle-build.log
+
+# Gradle & Kotlin build/cache artifacts
+.gradle/
+.kotlin/
+build/
+*/build/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Signing keys & secrets
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+secrets.properties
+google-services.json
+
+# IDEs & OS files
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
