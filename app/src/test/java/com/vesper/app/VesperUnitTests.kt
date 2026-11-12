@@ -11,12 +11,15 @@ import com.vesper.app.domain.model.GenerationRequestOverrides
 import com.vesper.app.domain.model.NewsFocus
 import com.vesper.app.domain.model.ScheduleMode
 import com.vesper.app.domain.model.WallpaperDossier
+import com.vesper.app.worker.ScheduleCoordinator
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 class VesperUnitTests {
 
@@ -69,9 +72,21 @@ class VesperUnitTests {
         val system = PromptDirector.buildSystemInstruction(settings, GenerationRequestOverrides())
         val user = PromptDirector.buildUserPrompt(snapshot, settings, GenerationRequestOverrides(), emptyList())
 
-        assertTrue(system.contains("SUBTLETY OVER SPECTACLE"))
+        assertTrue(system.contains("ULTRA-SUBTLE SPY CIPHER"))
+        assertTrue(system.contains("FULL-SPECTRUM THEME COLOR"))
         assertTrue(user.contains("Austin, United States"))
         assertTrue(user.contains("6°C colder drop vs yesterday"))
+        assertTrue(user.contains("what_happened"))
+        assertTrue(user.contains("happening_today"))
+        assertTrue(user.contains("coming_up"))
+
+        val directSystem = PromptDirector.buildSystemInstruction(
+            settings.copy(subtletyLevel = 0),
+            GenerationRequestOverrides()
+        )
+        assertTrue(directSystem.contains("DIRECT FIGURATIVE EDITORIAL"))
+        assertTrue(directSystem.contains("Do NOT invent cryptic abstract puzzles"))
+        assertFalse(directSystem.contains("observant spy leaving an oblique calling card"))
     }
 
     @Test
@@ -136,10 +151,11 @@ class VesperUnitTests {
         val user = PromptDirector.buildUserPrompt(snapshot, settings, GenerationRequestOverrides(), listOf(prior))
 
         assertTrue(user.contains("Morning Edition for 2026-11-12"))
-        assertTrue(user.contains("CHRONICLE LITMUS TEST"))
-        assertTrue(user.contains("SIGNIFICANCE BEATS NOVELTY"))
-        assertTrue(user.contains("ZERO FILLER RULE"))
-        assertTrue(user.contains("Prior Brief: Global climate summit talks continued"))
+        assertTrue(user.contains("RIGID 80/100 IMPORTANCE THRESHOLD"))
+        assertTrue(user.contains("CALM-DAY EMPTY RULE"))
+        assertTrue(user.contains("Nocturnal ink wash"))
+        // News text must NOT leak into the visual anti-repetition block (prevents dodging valid continuing news).
+        assertFalse(user.contains("Global climate summit talks continued"))
         assertTrue(user.contains("frost / freeze risk (0°C low)"))
         assertFalse(user.contains("Week 46 of 2026"))
         assertFalse(user.contains("Waxing Crescent (6% illuminated)"))
@@ -151,6 +167,86 @@ class VesperUnitTests {
             emptyList()
         )
         assertTrue(cosmosUser.contains("Notable Lunar Marker: Waxing Crescent (6% illuminated)"))
+    }
+
+    @Test
+    fun directorImportanceFilterEnforcesRigidThresholdAndEmptyCalmFallback() {
+        val mixed = listOf(
+            com.vesper.app.data.remote.DirectorEvaluatedEvent("Routine speech", "NATIONAL", 64),
+            com.vesper.app.data.remote.DirectorEvaluatedEvent("UN Climate Leaders Summit", "WORLD", 92),
+            com.vesper.app.data.remote.DirectorEvaluatedEvent("Historic Presidential Nomination", "NATIONAL", 84),
+            com.vesper.app.data.remote.DirectorEvaluatedEvent("First 0C freeze shift", "LOCAL_WEATHER", 80),
+            com.vesper.app.data.remote.DirectorEvaluatedEvent("Minor astronomy trivia", "WORLD", 35),
+            com.vesper.app.data.remote.DirectorEvaluatedEvent("un climate leaders summit", "WORLD", 88)
+        )
+        val kept = PromptDirector.filterQualifiedEvents(mixed)
+        assertEquals(3, kept.size)
+        assertEquals(92, kept[0].importanceScore)
+        assertEquals(84, kept[1].importanceScore)
+        assertEquals(80, kept[2].importanceScore)
+
+        val allSubThreshold = listOf(
+            com.vesper.app.data.remote.DirectorEvaluatedEvent("Mild drizzle", "LOCAL_WEATHER", 60),
+            com.vesper.app.data.remote.DirectorEvaluatedEvent("Local press briefing", "NATIONAL", 72)
+        )
+        assertTrue(PromptDirector.filterQualifiedEvents(allSubThreshold).isEmpty())
+
+        val partialTimeframes = DirectorJsonOutput(
+            evaluatedEvents = listOf(
+                com.vesper.app.data.remote.DirectorEvaluatedEvent("COP31 summit", "WORLD", 90)
+            ),
+            whatHappened = emptyList(),
+            happeningToday = listOf("COP31 climate talks entered their Leaders' Summit phase today."),
+            comingUp = emptyList(),
+            clueTitle = "Coastal Assembly",
+            artMedium = "Egg tempera",
+            paletteSummary = "Terracotta, saffron, teal",
+            conceptSummary = "Sunlit coastal amphitheater",
+            imagePrompt = "Vertical coastal illustration..."
+        )
+        val formatted = PromptDirector.formatCategorizedBriefing(partialTimeframes, allowEventBullets = true)
+        assertTrue(formatted.contains("What Happened (Recent):"))
+        assertTrue(formatted.contains("Nothing above the importance threshold in the recent window."))
+        assertTrue(formatted.contains("Happening Today:\n• COP31 climate talks"))
+        assertTrue(formatted.contains("Coming Up:\n• Nothing above the importance threshold scheduled ahead."))
+
+        val allCalm = PromptDirector.formatCategorizedBriefing(partialTimeframes, allowEventBullets = false)
+        assertTrue(allCalm.contains("• Nothing above the importance threshold unfolding today."))
+
+        val fakeClient = com.vesper.app.data.remote.GeminiClient(okhttp3.OkHttpClient())
+        val searchPrompt = fakeClient.buildGroundedSearchPrompt(
+            PromptDirector.buildUserPrompt(
+                ContextSnapshot(
+                    isoDate = "2026-11-12",
+                    dayOfWeek = "Thursday",
+                    weekLabel = "Week 46 of 2026",
+                    seasonLabel = "Autumn",
+                    timeOfDayLabel = "dawn",
+                    cityRegion = "Berlin",
+                    country = "Germany",
+                    latitude = null,
+                    longitude = null,
+                    weatherSummary = "clear, 5°C",
+                    tempDeltaSummary = "steady",
+                    moonPhase = "Waxing",
+                    calendarDensitySummary = null
+                ),
+                AppSettings(),
+                GenerationRequestOverrides(),
+                emptyList()
+            )
+        )
+        assertTrue(searchPrompt.contains("2026"))
+        assertTrue(searchPrompt.contains("STRICT CURRENT-YEAR ONLY"))
+        assertTrue(searchPrompt.contains("2024 or 2025"))
+
+        val searchCfg = fakeClient.buildSearchGenerationConfig(useHighThinking = true).toString()
+        assertTrue(searchCfg.contains("\"thinkingLevel\":\"HIGH\""))
+        assertFalse(searchCfg.contains("maxOutputTokens"))
+
+        val dirCfg = fakeClient.buildDirectorGenerationConfig(useSchema = true, useHighThinking = true).toString()
+        assertTrue(dirCfg.contains("\"thinkingLevel\":\"HIGH\""))
+        assertFalse(dirCfg.contains("maxOutputTokens"))
     }
 
     @Test
@@ -174,8 +270,8 @@ class VesperUnitTests {
 
         val user = PromptDirector.buildUserPrompt(snapshot, settings, GenerationRequestOverrides(), emptyList())
 
-        assertTrue(user.contains("WEEKLY EDITION"))
-        assertTrue(user.contains("Week 46 of 2026"))
+        assertTrue(user.contains("Next 7 days (Week 46 of 2026"))
+        assertTrue(user.contains("RIGID 80/100 IMPORTANCE THRESHOLD"))
     }
 
     @Test
@@ -262,5 +358,65 @@ class VesperUnitTests {
         assertEquals(sampleKey, globalReset.apiKey)
         assertEquals(AppSettings.DEFAULT_TEXT_MODEL, globalReset.pinnedTextModel)
         assertEquals(ScheduleMode.DAILY, globalReset.scheduleMode)
+    }
+
+    @Test
+    fun scheduleCoordinatorAnchorsDailyAndWeeklyTriggersWithoutDrift() {
+        val zone = ZoneId.of("UTC")
+        // Before 06:30 today -> stays today at 06:30:00 (fixes WorkManager flex +22h shift bug)
+        val earlyMorning = ZonedDateTime.of(2026, 11, 12, 5, 54, 33, 0, zone)
+        assertEquals(
+            ZonedDateTime.of(2026, 11, 12, 6, 30, 0, 0, zone),
+            ScheduleCoordinator.computeNextTriggerTime(earlyMorning, ScheduleMode.DAILY, 6, 30)
+        )
+        assertEquals(
+            ZonedDateTime.of(2026, 11, 12, 6, 30, 0, 0, zone),
+            ScheduleCoordinator.computeNextTriggerTime(earlyMorning, ScheduleMode.WEEKLY, 6, 30)
+        )
+
+        // Past 06:30 today -> advances cleanly to tomorrow (DAILY) or +7 days (WEEKLY)
+        val afterTarget = ZonedDateTime.of(2026, 11, 12, 6, 34, 0, 0, zone)
+        assertEquals(
+            ZonedDateTime.of(2026, 11, 13, 6, 30, 0, 0, zone),
+            ScheduleCoordinator.computeNextTriggerTime(afterTarget, ScheduleMode.DAILY, 6, 30)
+        )
+        assertEquals(
+            ZonedDateTime.of(2026, 11, 19, 6, 30, 0, 0, zone),
+            ScheduleCoordinator.computeNextTriggerTime(afterTarget, ScheduleMode.WEEKLY, 6, 30)
+        )
+
+        // Alarm firing 1s early (06:29:59) OR delayed 20m late (06:50:00) must advance to next cycle, never double-fire
+        val slightlyEarlyAlarm = ZonedDateTime.of(2026, 11, 12, 6, 29, 59, 0, zone)
+        assertEquals(
+            ZonedDateTime.of(2026, 11, 13, 6, 30, 0, 0, zone),
+            ScheduleCoordinator.computeNextTriggerTime(
+                now = slightlyEarlyAlarm,
+                mode = ScheduleMode.DAILY,
+                hour = 6,
+                minute = 30,
+                advancePastCurrentOccurrence = true
+            )
+        )
+        val idleDelayedAlarm = ZonedDateTime.of(2026, 11, 12, 6, 50, 0, 0, zone)
+        assertEquals(
+            ZonedDateTime.of(2026, 11, 13, 6, 30, 0, 0, zone),
+            ScheduleCoordinator.computeNextTriggerTime(
+                now = idleDelayedAlarm,
+                mode = ScheduleMode.DAILY,
+                hour = 6,
+                minute = 30,
+                advancePastCurrentOccurrence = true
+            )
+        )
+        assertEquals(
+            ZonedDateTime.of(2026, 11, 19, 6, 30, 0, 0, zone),
+            ScheduleCoordinator.computeNextTriggerTime(
+                now = idleDelayedAlarm,
+                mode = ScheduleMode.WEEKLY,
+                hour = 6,
+                minute = 30,
+                advancePastCurrentOccurrence = true
+            )
+        )
     }
 }

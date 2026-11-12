@@ -405,6 +405,7 @@ private fun DossierHeroPreview(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DossierIntelCard(
     dossier: WallpaperDossier,
@@ -435,7 +436,7 @@ fun DossierIntelCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Today's Dossier · What You Missed",
+                        text = "Today's Dossier · Briefing",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -480,26 +481,37 @@ fun DossierIntelCard(
                         }
                     }
 
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    Text(
+                        text = "Grounded Sources",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     if (dossier.groundingSources.isNotEmpty()) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            dossier.groundingSources.forEach { src ->
+                                AssistChip(
+                                    onClick = { runCatching { uriHandler.openUri(src.url) } },
+                                    label = { Text(src.title, maxLines = 1) },
+                                    trailingIcon = {
+                                        Icon(
+                                            painter = painterResource(R.drawable.ic_vesper_open_in_new),
+                                            contentDescription = "Open source",
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    } else {
                         Text(
-                            text = "Grounded Sources",
-                            style = MaterialTheme.typography.labelMedium,
+                            text = "No web source links were attached for this run (Search Grounding was off or returned zero citations).",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        dossier.groundingSources.forEach { src ->
-                            AssistChip(
-                                onClick = { runCatching { uriHandler.openUri(src.url) } },
-                                label = { Text(src.title, maxLines = 1) },
-                                trailingIcon = {
-                                    Icon(
-                                        painter = painterResource(R.drawable.ic_vesper_open_in_new),
-                                        contentDescription = "Open source",
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            )
-                        }
                     }
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)

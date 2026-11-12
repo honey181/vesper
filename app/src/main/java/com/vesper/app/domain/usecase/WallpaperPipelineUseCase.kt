@@ -129,14 +129,26 @@ class WallpaperPipelineUseCase(
             )
         }
 
+        val qualifiedEvents = PromptDirector.filterQualifiedEvents(directorResult.output.evaluatedEvents)
+        val allowQualifiedBullets = !(directorResult.output.evaluatedEvents.isNotEmpty() && qualifiedEvents.isEmpty())
+        val formattedBriefing = PromptDirector.formatCategorizedBriefing(
+            output = directorResult.output,
+            allowEventBullets = allowQualifiedBullets
+        )
+        val filteredClues = if (!allowQualifiedBullets) {
+            emptyList()
+        } else {
+            directorResult.output.encodedClues.map {
+                EncodedClue(it.visualElement, it.realWorldMeaning)
+            }
+        }
+
         val dossier = WallpaperDossier(
             id = dossierId,
             createdAtEpochMs = System.currentTimeMillis(),
             clueTitle = directorResult.output.clueTitle,
-            realWorldBriefing = directorResult.output.realWorldBriefing,
-            encodedClues = directorResult.output.encodedClues.map {
-                EncodedClue(it.visualElement, it.realWorldMeaning)
-            },
+            realWorldBriefing = formattedBriefing,
+            encodedClues = filteredClues,
             groundingSources = directorResult.groundingSources,
             artMedium = directorResult.output.artMedium,
             paletteSummary = directorResult.output.paletteSummary,

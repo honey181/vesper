@@ -41,5 +41,6 @@ class VesperApplication : Application() {
         super.onCreate()
         container = AppContainer(this)
         ScheduleManager.ensureNotificationChannel(this)
+        com.vesper.app.worker.ScheduleCoordinator.bootstrapFromAppContext(this)
     }
 }

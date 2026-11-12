@@ -111,12 +111,12 @@ fun StudioBottomSheet(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Spy Subtlety", style = MaterialTheme.typography.titleMedium)
+                    Text("Visual Subtlety", style = MaterialTheme.typography.titleMedium)
                     Text(
                         text = when {
-                            subtlety >= 70f -> "Pure Cipher (${subtlety.roundToInt()})"
+                            subtlety >= 70f -> "Cipher (${subtlety.roundToInt()})"
                             subtlety >= 35f -> "Poetic (${subtlety.roundToInt()})"
-                            else -> "Atmospheric (${subtlety.roundToInt()})"
+                            else -> "Direct (${subtlety.roundToInt()})"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary

@@ -1,5 +1,9 @@
 package com.vesper.app.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -18,6 +22,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -29,14 +34,22 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimeInput
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -51,11 +64,12 @@ import com.vesper.app.domain.model.ScheduleMode
 import com.vesper.app.domain.model.ThinkingLevelOption
 import com.vesper.app.domain.model.WallpaperTarget
 import com.vesper.app.ui.VesperUiState
+import com.vesper.app.worker.ScheduleCoordinator
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     state: VesperUiState,
@@ -72,6 +86,25 @@ fun SettingsScreen(
     val defaults = remember { AppSettings() }
     val detectedW = state.deviceScreenSpec.widthPx
     val detectedH = state.deviceScreenSpec.heightPx
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var exactAlarmAllowed by remember {
+        mutableStateOf(ScheduleCoordinator.canScheduleExactAlarms(context))
+    }
+
+    DisposableEffect(lifecycleOwner, s) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val allowedNow = ScheduleCoordinator.canScheduleExactAlarms(context)
+                if (allowedNow != exactAlarmAllowed) {
+                    exactAlarmAllowed = allowedNow
+                    ScheduleCoordinator.syncSchedule(context, s)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     var keyDraft by remember(s.apiKey) { mutableStateOf(s.apiKey) }
     var showKey by remember { mutableStateOf(false) }
@@ -84,6 +117,8 @@ fun SettingsScreen(
     var customSeedDraft by remember(s.customSeedNote) { mutableStateOf(s.customSeedNote) }
     var showResetAllDialog by remember { mutableStateOf(false) }
     var showClearKeyDialog by remember { mutableStateOf(false) }
+    var showTimePickerDialog by remember { mutableStateOf(false) }
+    var useClockDial by remember { mutableStateOf(false) }
 
     val keyDirty = s.apiKey.isNotBlank() || keyDraft.isNotBlank()
     val modelsDirty = s.hasCustomModels() ||
@@ -317,22 +352,22 @@ fun SettingsScreen(
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Preferred Refresh Hour: %02d:%02d".format(s.scheduleHour, s.scheduleMinute),
+                    text = "Refresh Time: %02d:%02d".format(s.scheduleHour, s.scheduleMinute),
                     style = MaterialTheme.typography.bodyMedium
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = {
                         onUpdateSettings { it.copy(scheduleHour = (it.scheduleHour + 23) % 24) }
                     }) { Text("-1h") }
                     OutlinedButton(onClick = {
                         onUpdateSettings { it.copy(scheduleHour = (it.scheduleHour + 1) % 24) }
                     }) { Text("+1h") }
+                    OutlinedButton(onClick = {
+                        useClockDial = false
+                        showTimePickerDialog = true
+                    }) { Text("Set Time") }
                 }
             }
 
@@ -354,6 +389,32 @@ fun SettingsScreen(
                     if (v) onRequestNotificationPermission()
                 }
             )
+            Text(
+                text = ScheduleCoordinator.formatNextScheduleSummary(context, s),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (s.scheduleMode != ScheduleMode.MANUAL_ONLY &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                !exactAlarmAllowed
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        val exactIntent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                            data = Uri.parse("package:${context.packageName}")
+                        }
+                        runCatching { context.startActivity(exactIntent) }.onFailure {
+                            val appSettingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.parse("package:${context.packageName}")
+                            }
+                            runCatching { context.startActivity(appSettingsIntent) }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Allow Exact %02d:%02d Wake-Up (Silent)".format(s.scheduleHour, s.scheduleMinute))
+                }
+            }
         }
 
         // 4. DISPLAY & WALLPAPER TARGET
@@ -502,8 +563,17 @@ fun SettingsScreen(
             }
 
             Text(
-                text = "Subtlety Level (${s.subtletyLevel}/100)",
+                text = "Visual Subtlety (${s.subtletyLevel}/100 · " + when {
+                    s.subtletyLevel >= 70 -> "Cipher"
+                    s.subtletyLevel >= 35 -> "Poetic"
+                    else -> "Direct"
+                } + ")",
                 style = MaterialTheme.typography.labelMedium
+            )
+            Text(
+                text = "0–34: recognizable figurative scenes · 35–69: poetic metaphors · 70–100: abstract cipher clues",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Slider(
                 value = s.subtletyLevel.toFloat(),
@@ -672,6 +742,54 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showClearKeyDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showTimePickerDialog) {
+        val timePickerState = rememberTimePickerState(
+            initialHour = s.scheduleHour.coerceIn(0, 23),
+            initialMinute = s.scheduleMinute.coerceIn(0, 59),
+            is24Hour = android.text.format.DateFormat.is24HourFormat(context)
+        )
+        AlertDialog(
+            onDismissRequest = { showTimePickerDialog = false },
+            title = { Text("Set Auto-Update Time") },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (useClockDial) {
+                        TimePicker(state = timePickerState)
+                    } else {
+                        TimeInput(state = timePickerState)
+                    }
+                    TextButton(onClick = { useClockDial = !useClockDial }) {
+                        Text(if (useClockDial) "Type Time Manually" else "Use Clock Dial")
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val h = timePickerState.hour.coerceIn(0, 23)
+                        val m = timePickerState.minute.coerceIn(0, 59)
+                        onUpdateSettings {
+                            it.copy(scheduleHour = h, scheduleMinute = m)
+                        }
+                        onShowStatus("Refresh time set to %02d:%02d".format(h, m))
+                        showTimePickerDialog = false
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTimePickerDialog = false }) {
                     Text("Cancel")
                 }
             }

@@ -76,57 +76,7 @@ object ScheduleManager {
     }
 
     fun syncSchedule(context: Context, settings: AppSettings) {
-        val wm = WorkManager.getInstance(context)
-        if (settings.scheduleMode == ScheduleMode.MANUAL_ONLY || settings.apiKey.isBlank()) {
-            wm.cancelUniqueWork(WORK_NAME)
-            return
-        }
-
-        val intervalHours = when (settings.scheduleMode) {
-            ScheduleMode.DAILY -> 24L
-            ScheduleMode.WEEKLY -> 24L * 7L
-            ScheduleMode.MANUAL_ONLY -> return
-        }
-
-        val initialDelayMinutes = computeInitialDelayMinutes(
-            hour = settings.scheduleHour,
-            minute = settings.scheduleMinute
-        )
-
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(
-                if (settings.requireWifi) NetworkType.UNMETERED else NetworkType.CONNECTED
-            )
-            .setRequiresCharging(settings.requireCharging)
-            .build()
-
-        val request = PeriodicWorkRequestBuilder<WallpaperWorker>(
-            intervalHours,
-            TimeUnit.HOURS,
-            90,
-            TimeUnit.MINUTES
-        )
-            .setInitialDelay(initialDelayMinutes, TimeUnit.MINUTES)
-            .setConstraints(constraints)
-            .build()
-
-        wm.enqueueUniquePeriodicWork(
-            WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
-            request
-        )
-    }
-
-    private fun computeInitialDelayMinutes(hour: Int, minute: Int): Long {
-        val now = ZonedDateTime.now()
-        var next = now.withHour(hour.coerceIn(0, 23))
-            .withMinute(minute.coerceIn(0, 59))
-            .withSecond(0)
-            .withNano(0)
-        if (!next.isAfter(now)) {
-            next = next.plusDays(1)
-        }
-        return Duration.between(now, next).toMinutes().coerceAtLeast(1L)
+        ScheduleCoordinator.syncSchedule(context, settings)
     }
 
     fun postNewWallpaperNotification(context: Context, title: String, briefing: String) {

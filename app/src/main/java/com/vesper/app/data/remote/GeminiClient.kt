@@ -26,9 +26,20 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 @Serializable
+data class DirectorEvaluatedEvent(
+    val topic: String,
+    val scope: String = "WORLD",
+    @SerialName("importance_score") val importanceScore: Int = 0
+)
+
+@Serializable
 data class DirectorJsonOutput(
+    @SerialName("evaluated_events") val evaluatedEvents: List<DirectorEvaluatedEvent> = emptyList(),
+    @SerialName("what_happened") val whatHappened: List<String> = emptyList(),
+    @SerialName("happening_today") val happeningToday: List<String> = emptyList(),
+    @SerialName("coming_up") val comingUp: List<String> = emptyList(),
     @SerialName("clue_title") val clueTitle: String,
-    @SerialName("real_world_briefing") val realWorldBriefing: String,
+    @SerialName("real_world_briefing") val realWorldBriefing: String = "",
     @SerialName("encoded_clues") val encodedClues: List<DirectorClueItem> = emptyList(),
     @SerialName("art_medium") val artMedium: String,
     @SerialName("palette_summary") val paletteSummary: String,
@@ -161,38 +172,90 @@ class GeminiClient(private val httpClient: OkHttpClient) {
 
         var lastError: Throwable? = null
         for (modelId in modelsToTry) {
-            // Attempt 1: With Search Grounding (if enabled) + strict JSON Schema
-            val attempt1 = runCatching {
-                executeDirectorCall(
-                    apiKey = apiKey,
-                    modelId = modelId,
-                    systemInstruction = systemInstruction,
-                    userPrompt = userPrompt,
-                    useSearchGrounding = enableSearchGrounding,
-                    useSchema = true
-                )
-            }
-            if (attempt1.isSuccess) return@withContext attempt1.getOrThrow()
-
-            // Attempt 2: If Search Grounding + Schema combined rejected by this model snapshot, keep grounding and parse JSON text
             if (enableSearchGrounding) {
-                val attempt2 = runCatching {
+                // Step 1: Dedicated live Google Search call strictly anchored to the current year/date.
+                val searchPass = runCatching {
+                    executeGroundedSearch(apiKey = apiKey, modelId = modelId, userPrompt = userPrompt)
+                }.getOrNull()
+
+                if (searchPass != null && searchPass.first.isNotBlank()) {
+                    val groundedPrompt = """
+$userPrompt
+
+VERIFIED CURRENT-YEAR LIVE WEB RESEARCH (authoritative news sources — base ALL news items strictly on these verified current events + provided weather context; reject any older historical events):
+${searchPass.first}
+""".trimIndent()
+                    val step2 = runCatching {
+                        executeDirectorCall(
+                            apiKey = apiKey,
+                            modelId = modelId,
+                            systemInstruction = systemInstruction,
+                            userPrompt = groundedPrompt,
+                            useSearchGrounding = false,
+                            useSchema = true
+                        )
+                    }
+                    if (step2.isSuccess) {
+                        val result = step2.getOrThrow()
+                        return@withContext result.copy(groundingSources = searchPass.second)
+                    }
+                    lastError = step2.exceptionOrNull()
+                }
+
+                // Fallback: Single grounded schema call if search pre-pass failed cleanly.
+                val fallbackAttempt = runCatching {
                     executeDirectorCall(
                         apiKey = apiKey,
                         modelId = modelId,
                         systemInstruction = systemInstruction,
-                        userPrompt = "$userPrompt\n\nRespond ONLY with raw valid JSON (no markdown code fences).",
+                        userPrompt = userPrompt,
                         useSearchGrounding = true,
-                        useSchema = false
+                        useSchema = true
                     )
                 }
-                if (attempt2.isSuccess) return@withContext attempt2.getOrThrow()
-                lastError = attempt2.exceptionOrNull()
+                if (fallbackAttempt.isSuccess) return@withContext fallbackAttempt.getOrThrow()
+                lastError = fallbackAttempt.exceptionOrNull() ?: lastError
             } else {
-                lastError = attempt1.exceptionOrNull()
+                val attempt = runCatching {
+                    executeDirectorCall(
+                        apiKey = apiKey,
+                        modelId = modelId,
+                        systemInstruction = systemInstruction,
+                        userPrompt = userPrompt,
+                        useSearchGrounding = false,
+                        useSchema = true
+                    )
+                }
+                if (attempt.isSuccess) return@withContext attempt.getOrThrow()
+                lastError = attempt.exceptionOrNull()
             }
         }
         throw lastError ?: IllegalStateException("Creative Director generation failed")
+    }
+
+    internal fun buildDirectorGenerationConfig(
+        useSchema: Boolean,
+        useHighThinking: Boolean
+    ): JsonObject = buildJsonObject {
+        put("temperature", 0.2)
+        if (useSchema) {
+            put("responseMimeType", "application/json")
+            put("responseSchema", directorResponseSchema())
+        }
+        if (useHighThinking) {
+            put("thinkingConfig", buildJsonObject {
+                put("thinkingLevel", "HIGH")
+            })
+        }
+    }
+
+    internal fun buildSearchGenerationConfig(useHighThinking: Boolean): JsonObject = buildJsonObject {
+        put("temperature", 0.1)
+        if (useHighThinking) {
+            put("thinkingConfig", buildJsonObject {
+                put("thinkingLevel", "HIGH")
+            })
+        }
     }
 
     private fun executeDirectorCall(
@@ -202,6 +265,42 @@ class GeminiClient(private val httpClient: OkHttpClient) {
         userPrompt: String,
         useSearchGrounding: Boolean,
         useSchema: Boolean
+    ): DirectorResult {
+        return try {
+            executeDirectorCallInternal(
+                apiKey = apiKey,
+                modelId = modelId,
+                systemInstruction = systemInstruction,
+                userPrompt = userPrompt,
+                useSearchGrounding = useSearchGrounding,
+                useSchema = useSchema,
+                useHighThinking = true
+            )
+        } catch (ex: GeminiApiException) {
+            if (ex.statusCode == 400) {
+                executeDirectorCallInternal(
+                    apiKey = apiKey,
+                    modelId = modelId,
+                    systemInstruction = systemInstruction,
+                    userPrompt = userPrompt,
+                    useSearchGrounding = useSearchGrounding,
+                    useSchema = useSchema,
+                    useHighThinking = false
+                )
+            } else {
+                throw ex
+            }
+        }
+    }
+
+    private fun executeDirectorCallInternal(
+        apiKey: String,
+        modelId: String,
+        systemInstruction: String,
+        userPrompt: String,
+        useSearchGrounding: Boolean,
+        useSchema: Boolean,
+        useHighThinking: Boolean
     ): DirectorResult {
         val payload = buildJsonObject {
             put("systemInstruction", buildJsonObject {
@@ -224,13 +323,7 @@ class GeminiClient(private val httpClient: OkHttpClient) {
                     })
                 })
             }
-            put("generationConfig", buildJsonObject {
-                put("temperature", 0.45)
-                if (useSchema) {
-                    put("responseMimeType", "application/json")
-                    put("responseSchema", directorResponseSchema())
-                }
-            })
+            put("generationConfig", buildDirectorGenerationConfig(useSchema, useHighThinking))
         }
 
         val request = Request.Builder()
@@ -271,6 +364,92 @@ class GeminiClient(private val httpClient: OkHttpClient) {
                 modelUsed = resolvedModel
             )
         }
+    }
+
+    private fun executeGroundedSearch(
+        apiKey: String,
+        modelId: String,
+        userPrompt: String
+    ): Pair<String, List<GroundingSource>> {
+        return try {
+            executeGroundedSearchInternal(apiKey, modelId, userPrompt, useHighThinking = true)
+        } catch (ex: GeminiApiException) {
+            if (ex.statusCode == 400) {
+                executeGroundedSearchInternal(apiKey, modelId, userPrompt, useHighThinking = false)
+            } else {
+                throw ex
+            }
+        }
+    }
+
+    private fun executeGroundedSearchInternal(
+        apiKey: String,
+        modelId: String,
+        userPrompt: String,
+        useHighThinking: Boolean
+    ): Pair<String, List<GroundingSource>> {
+        val searchPrompt = buildGroundedSearchPrompt(userPrompt)
+
+        val payload = buildJsonObject {
+            put("contents", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("parts", buildJsonArray {
+                        add(buildJsonObject { put("text", searchPrompt) })
+                    })
+                })
+            })
+            put("tools", buildJsonArray {
+                add(buildJsonObject { put("google_search", buildJsonObject {}) })
+            })
+            put("generationConfig", buildSearchGenerationConfig(useHighThinking))
+        }
+
+        val request = Request.Builder()
+            .url("$baseUrl/models/$modelId:generateContent")
+            .header("x-goog-api-key", apiKey.trim())
+            .post(payload.toString().toRequestBody(jsonMediaType))
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val body = response.body.string()
+            if (!response.isSuccessful) {
+                throw GeminiApiException(response.code, parseFriendlyError(response.code, body))
+            }
+            val root = json.parseToJsonElement(body).jsonObject
+            val candidate = root["candidates"]?.jsonArray?.firstOrNull()?.jsonObject
+                ?: return "" to emptyList()
+            val textParts = candidate["content"]?.jsonObject?.get("parts")?.jsonArray
+                ?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.contentOrNull }
+                ?.joinToString("\n")
+                ?.trim()
+                .orEmpty()
+            val sources = extractGroundingSources(candidate)
+            return textParts to sources
+        }
+    }
+
+    internal fun buildGroundedSearchPrompt(userPrompt: String): String {
+        val lines = userPrompt.lines()
+        val dateLine = lines.firstOrNull { it.startsWith("- Date:") } ?: ""
+        val locationLine = lines.firstOrNull { it.startsWith("- Location:") } ?: ""
+        val editionLine = lines.firstOrNull { it.startsWith("- Active Edition:") } ?: ""
+        val currentYear = Regex("""\b(20\d{2})\b""").find(dateLine)?.groupValues?.getOrNull(1) ?: "current year"
+        return """
+Execute Google Search RIGHT NOW for breaking and front-page real-world news matching this exact context:
+$editionLine
+$dateLine
+$locationLine
+
+MANDATORY DATE & SOURCE VERIFICATION RULES:
+1. ALWAYS include the exact year $currentYear in your Google Search queries (e.g., world front-page news $currentYear, national news $currentYear) across reputable news agencies/public broadcasters (Reuters, AP, BBC, DW, Tagesschau, official press portals).
+2. STRICT CURRENT-YEAR ONLY: Verify the actual publication date & year of every single event BEFORE reporting it. DISCARD any Wikipedia overview, "On this day" retrospective, or event from previous years (NEVER confuse same-month events from prior years like 2024 or 2025 with $currentYear).
+3. Include BOTH major international developments AND major national/regional events for the location above.
+4. Return concise, factual bullet points organized with the exact date (`MMM D, $currentYear`) under:
+   - What Happened (recent / last ~24h)
+   - Happening Today
+   - Coming Up (upcoming scheduled events)
+""".trimIndent()
     }
 
     suspend fun generateWallpaperImage(
@@ -385,6 +564,34 @@ class GeminiClient(private val httpClient: OkHttpClient) {
     private fun directorResponseSchema(): JsonObject = buildJsonObject {
         put("type", "OBJECT")
         put("properties", buildJsonObject {
+            put("evaluated_events", buildJsonObject {
+                put("type", "ARRAY")
+                put("items", buildJsonObject {
+                    put("type", "OBJECT")
+                    put("properties", buildJsonObject {
+                        put("topic", buildJsonObject { put("type", "STRING") })
+                        put("scope", buildJsonObject { put("type", "STRING") })
+                        put("importance_score", buildJsonObject { put("type", "INTEGER") })
+                    })
+                    put("required", buildJsonArray {
+                        add(JsonPrimitive("topic"))
+                        add(JsonPrimitive("scope"))
+                        add(JsonPrimitive("importance_score"))
+                    })
+                })
+            })
+            put("what_happened", buildJsonObject {
+                put("type", "ARRAY")
+                put("items", buildJsonObject { put("type", "STRING") })
+            })
+            put("happening_today", buildJsonObject {
+                put("type", "ARRAY")
+                put("items", buildJsonObject { put("type", "STRING") })
+            })
+            put("coming_up", buildJsonObject {
+                put("type", "ARRAY")
+                put("items", buildJsonObject { put("type", "STRING") })
+            })
             put("clue_title", buildJsonObject { put("type", "STRING") })
             put("real_world_briefing", buildJsonObject { put("type", "STRING") })
             put("encoded_clues", buildJsonObject {
@@ -407,6 +614,10 @@ class GeminiClient(private val httpClient: OkHttpClient) {
             put("image_prompt", buildJsonObject { put("type", "STRING") })
         })
         put("required", buildJsonArray {
+            add(JsonPrimitive("evaluated_events"))
+            add(JsonPrimitive("what_happened"))
+            add(JsonPrimitive("happening_today"))
+            add(JsonPrimitive("coming_up"))
             add(JsonPrimitive("clue_title"))
             add(JsonPrimitive("real_world_briefing"))
             add(JsonPrimitive("encoded_clues"))
@@ -420,12 +631,18 @@ class GeminiClient(private val httpClient: OkHttpClient) {
     private fun extractGroundingSources(candidate: JsonObject): List<GroundingSource> {
         val chunks = candidate["groundingMetadata"]?.jsonObject?.get("groundingChunks")?.jsonArray
             ?: return emptyList()
-        return chunks.mapNotNull { chunk ->
+        val mapped = chunks.mapNotNull { chunk ->
             val web = chunk.jsonObject["web"]?.jsonObject ?: return@mapNotNull null
             val uri = web["uri"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
             val title = web["title"]?.jsonPrimitive?.contentOrNull ?: uri
             GroundingSource(title = title, url = uri)
-        }.distinctBy { it.url }.take(5)
+        }.distinctBy { it.url }
+
+        val nonEncyclopedia = mapped.filterNot {
+            it.title.equals("wikipedia.org", ignoreCase = true) ||
+                it.title.equals("google.com", ignoreCase = true)
+        }
+        return (if (nonEncyclopedia.isNotEmpty()) nonEncyclopedia else mapped).take(6)
     }
 
     private fun extractJsonObjectString(raw: String): String {
